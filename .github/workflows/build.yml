@@ -1,0 +1,78 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this config repo
+        uses: actions/checkout@v4
+
+      - name: Read pinned Marlin version
+        id: marlin
+        run: echo "ref=$(cat MARLIN_VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Marlin ${{ steps.marlin.outputs.ref }}
+        uses: actions/checkout@v4
+        with:
+          repository: MarlinFirmware/Marlin
+          ref: ${{ steps.marlin.outputs.ref }}
+          path: marlin
+
+      - name: Apply configuration
+        run: |
+          cp config/Configuration.h     marlin/Marlin/Configuration.h
+          cp config/Configuration_adv.h marlin/Marlin/Configuration_adv.h
+
+      - name: Apply patches
+        run: |
+          cd marlin
+          for p in ../patches/*.patch; do
+            echo "Applying $p"
+            git apply "$p"
+          done
+
+      - name: Select build environment
+        run: |
+          cd marlin
+          sed -i 's/^default_envs = .*/default_envs = STM32G0B1RE_btt/' platformio.ini
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build
+        run: cd marlin && pio run -e STM32G0B1RE_btt
+
+      - name: Stage release files
+        run: |
+          mkdir -p out
+          cp marlin/.pio/build/STM32G0B1RE_btt/firmware.bin out/firmware.bin
+          cp screen/DWIN_SET.tar.gz out/DWIN_SET.tar.gz
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ender5plus-skr-mini-e3-firmware
+          path: out/*
+          if-no-files-found: error
+
+      - name: Publish release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" out/firmware.bin out/DWIN_SET.tar.gz \
+            --title "Ender 5 Plus / SKR Mini E3 V3.0 ${GITHUB_REF_NAME}" \
+            --notes "Built against Marlin $(cat MARLIN_VERSION). Flash firmware.bin to the board (FAT32 microSD, board slot). Flash the extracted DWIN_SET to the stock DWIN touchscreen (FAT32, 4K cluster, screen SD slot). See the README for wiring and details."
